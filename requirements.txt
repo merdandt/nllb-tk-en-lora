@@ -1,0 +1,10 @@
+torch
+transformers==4.51.3
+datasets==3.5.0
+peft==0.15.2
+evaluate==0.4.3
+sacrebleu==2.5.1
+accelerate==1.6.0
+tensorboard==2.18.0
+matplotlib==3.10.1
+

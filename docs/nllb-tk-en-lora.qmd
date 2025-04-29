@@ -1,0 +1,265 @@
+---
+title: "Fine-Tuning NLLB-200 with LoRA on a 650-Sentence Turkmen–English Corpus"
+author: "MERDAN Durdyyev"
+date: "April 25, 2025"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    code-tools: true
+    highlight-style: github
+---
+
+*(This post is not about teaching but sharing my path and learning from you. And this is not the final model - it is just a beginning. I embed some Turkmen words in this article, so if you want to see the full meaning, try this model 😉)*
+
+
+## Motivation and intent
+### Why?
+The work is actually a final project for my [DATA 5610 – Advanced Machine Learning for Analytics](https://www.coursicle.com/usu/courses/DATA/5610/) by [Sharad Jones](https://www.coursicle.com/usu/professors/Sharad+Jones/). Usually this final project aims for business and analytical problems, but I convinced my professor to choose this project because I want to contribute to the Turkmen AI community as well.  
+
+### Problem?
+We have close to zero AI production in our community, and because of data scarcity and the hardness of the collective big brother, there is little development regarding the Turkmen language. Although SOTA models can do a better-than-ok job, any open-source translation or LLMs lag behind good translation and communication. So why not try to do something? 
+*(Çözeliň bu meseläni)*
+
+## What will you find in this post?
+This article would be interesting for any Turkmen AI enthusiast and Machine Learning practitioner. I will walk you through the path I took to prepare and create the unique dataset, upload it to Hugging Face, and tune the NLLB-200 model on a small dataset using [LoRA](https://github.com/microsoft/lora). You will be provided links to the:  
+
+- GitHub repository with all the materials and code.  
+- Links to the Hugging Face Demo Space where you can try the model.  
+- Link to the unique (but small) dataset of Turkmen-English sentences.  
+- Links to the final (merged) model and its adapters.  
+
+## Data is everything
+I personally believe that nowadays a usual LLM consists of three components (Data – 75 %, Computation resources – 20 %, and Codebase – 5 %). Why is the codebase so small? All you are going to write is already written, and you can vibe-code small tuning code or repeat the code from open-source papers with the help of generative LLMs as long as you have good, clean data and powerful computation power.
+*(Pul bolsa olaryň hemmesi çözüler agam)*
+
+Computation is more or less affordable with [Google Colab](https://colab.research.google.com/) and I think it would be enough for my experiment. What about the data? I searched the whole internet and found some resources for [parallel corpora](https://www.ilc.cnr.it/EAGLES96/corpustyp/node20.html#:~:text=A%20parallel%20corpus%20is%20a,however%2C%20exist%20in%20several%20languages.). The most common repository is [OPUS](https://opus.nlpl.eu/). Additionally, more data and neat validation/test datasets can be found on the WMT competitions website (like [WMT22](https://www.statmt.org/wmt21/translation-task.html), [WMT21](https://www.statmt.org/wmt22/translation-task.html), [WMT23](https://machinetranslate.org/wmt23) and [WMT24](https://machinetranslate.org/wmt24)). But I thought if I could easily find them they are probably hidden inside the weights of any model. And if you take a [closer look](https://opus.nlpl.eu/results/en&tk/corpus-result-table) at that Turkmen translation it is actually not good. So I bravely decided to create my own *(Tas puşman etdirdi)*.
+
+## Creating a dataset
+This started as fun but turned out to be a really annoying process. Because I wanted to have *real* Turkmen translations done by humans, I had no choice other than manually collecting from publicly available sources:  
+
+1. Translated books authored by Gurbanguly Berdimuhamedov, obtained from the official Turkmenistan government portal: <https://maslahat.gov.tm/books>.  
+2. Supplementary translated materials sourced from various public journals at <https://metbugat.gov.tm>.  
+
+Full information about this dataset can be read in the `turkmen_english_s500` [dataset card](https://huggingface.co/datasets/XSkills/turkmen_english_s500/edit/main/README.md).  
+Long story short, for the journals I asked my fellows and tried to build automation scripting myself for the book PDF part. *(I spent two days automating a two-day task.)*
+
+At the end of the day we came up with this:
+
+```text
+DatasetDict({
+    train: Dataset({
+        features: ['translation'],
+        num_rows: 495
+    })
+    validation: Dataset({
+        features: ['translation'],
+        num_rows: 62
+    })
+    test: Dataset({
+        features: ['translation'],
+        num_rows: 62
+    })
+})
+```
+Which is small, but hopefully correct and precise *(See the dataset README for details)*.
+
+## Base model selection
+After searching through Hugging Face I came up with two options which I tested myself:
+- [NLLB-200](https://huggingface.co/facebook/nllb-200-distilled-600M) from the Facebook.
+- [madlad400-10b-mt](https://huggingface.co/google/madlad400-10b-mt) from Google.
+
+Both are good in translation and capturing the Turkmen intonation; `madlad400-10b-mt` felt slightly better for me but after comparing the performance and parameters `(10 B > 600 M)` and considering my microscopic dataset I decided to proceed with the *NLLB-200*.
+*(Ýatyryp aýlaýyn diýdim)*
+
+## Selecting the tuning method
+Knowing my tiny dataset and empty pocket I knew that I should look at [parameter-efficient fine-tuning](https://www.ibm.com/think/topics/parameter-efficient-fine-tuning) techniques *(Garyp oglanlar AI bilen meşgullamaýar)*. I ended up choosing *LoRA*. Why? My idea is to preserve multilingual knowledge by keeping original weights intact while adding small, targeted updates and the ability to control which attention modules to tune. On top of that we can create no inference latency as updates can be merged with original weights after training.
+
+## Let's start tuning blindly
+*(I want to show you two parts of the tuning – “bad” and “good” hyperparameters and the contradiction with the metrics. So when I refer to Bad it means the first training, and Good means the last (but not least))*
+
+### Put defaults and give it a shot
+I think that the main components of my fine-tuning journey are around these three parts: `LoRA config`, `Training arguments`, and `Evaluation`.
+For evaluation I decided to pick the standard for translation: [BLEU](https://www.youtube.com/watch?v=M05L1DhFqcw), [chrF](https://machinetranslate.org/chrF), and [TER](https://machinetranslate.org/ter). There is nothing to talk about the metrics since you define them and write code — they do not change over time or with your hyperparameter changes. But what we can play with are our [hyperparameters](https://www.ibm.com/think/topics/hyperparameter-tuning) of LoRA config and Training arguments. It is all about trying and testing, so the first couple of iterations of default configurations gave me what I later understood was a bad model with good metrics.
+*(Ýatyp galanyňdan atyp gal)*
+I just applied these:
+*LoRA Config*:
+```python
+lora_config = LoraConfig(
+    r=16,                           
+    lora_alpha=32,                 
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type=TaskType.SEQ_2_SEQ_LM,
+)
+```
+and *Training arguments*:
+```python
+training_args = Seq2SeqTrainingArguments(
+    output_dir=TUNNED_MODEL_DIR,
+    per_device_train_batch_size=8,
+    per_device_eval_batch_size=8,
+    weight_decay=0.01,
+    save_total_limit=3,
+    learning_rate=5e-4,
+    num_train_epochs=15,
+    lr_scheduler_type="linear",
+    predict_with_generate=True,
+    fp16=True if torch.cuda.is_available() else False,
+    logging_dir="./logs",
+    logging_steps=50,
+    eval_steps=100,               
+    save_steps=100,               
+    eval_accumulation_steps=2, 
+    report_to="tensorboard",
+    warmup_ratio=0.1
+)
+```
+### Writing code for LoRA
+And remember I said about *(5 % for code)*? Thanks to AI influencers and hype, all those machine-learning and AI codes are more or less accessible. You can see how different LLM providers suggested code with an identical prompt and use it:
+- [Anthropic Claude 3.7 Sonnet](https://claude.ai/share/902510fe-9e89-47b0-b7db-0c42881d91dc)
+- [ChatGPT 4.5](https://chatgpt.com/share/67f3ef9a-de4c-8004-900e-ed178905c640)
+- [DeepSeek R1](https://gist.github.com/merdandt/35bf0217f3b62d770da692125aadbb66)
+- [Gemini 2.5 Pro (experimental)](https://gemini.google.com/share/bfd75a1ec37c)
+- [Grok 3](https://docs.google.com/document/d/12sw-kxcQq6Af_yjJKaKFWRjebqtBurbkF4AkU5V46_s/edit?usp=sharing)
+So did I. I took good ideas from each of them and ended up with my Google Colab notebook. Nothing fancy, right? I got the A100 GPU from Colab and wrote code that works. But what this code does we will explore below.
+*(The number of trainable params: 3,538,944 || all params: 618,612,736 || trainable%: 0.5721.)*
+
+### Result of the `Bad`-good metrics
+After ~3 minutes of training and ~7 minutes of evaluating I got my initial results of model evaluation. As you can see on the image below the numbers look great… too great.
+
+English to Turkmen translation
+![Bad metrics En -> Tk](assets/metrics_comparison_en_to_tk_(bad).png){#fig:bad-metrics_en_to_tk}
+| Metric                    | Fine-tuned | Original | Difference |
+|---------------------------|-----------:|---------:|-----------:|
+| **BLEU**                  |       7.38 |     8.12 |      -0.74 |
+| **chrF**                  |      40.49 |    39.46 |      +1.03 |
+| **TER (lower is better)** |      88.45 |    87.30 |      +1.15 |
+
+Turkmen to English translation
+![Bad metrics Tk -> En](assets/metrics_comparison_tk_to_en_(bad).png){#fig:bad-metrics_tk_to_en}
+| Metric                    | Fine-tuned | Original | Difference |
+|---------------------------|-----------:|---------:|-----------:|
+| **BLEU**                  |      39.25 |    26.48 |      +12.77 |
+| **chrF**                  |      61.72 |    52.91 |      +8.81  |
+| **TER (lower is better)** |      51.31 |    69.70 |      -18.39 |
+
+As you can see the numbers are not bad at all. One might say perfect. But if you ever took a statistics class you know that perfect model metrics are a mirage. So I decided to check the human-evaluation table.
+
+### Human evaluation of the *Bad*-good metrics
+I uploaded the test examples to Google Sheets so you also can see and applied conditional formatting to see the differences between the translations (fine-tuned vs original model). Since I know the Turkmen language I was able to evaluate the translation.
+
+English to Turkmen translation
+![Bad human evaluation En -> Tk](assets/translation_comparison_results_en_to_tk_(Bad).png){#fig:bad-human-eval_en_to_tk}
+See it yourself [here](https://docs.google.com/spreadsheets/d/1LI1ipu4rPjG-NKuXAaHz5wmUzIRgsaixpBIE-7Kb0Hk/edit?usp=sharing)
+
+Turkmen to English translation
+![Bad human evaluation Tk -> En](assets/translation_comparison_results_tk_to_en_(Bad).png){#fig:good-human-eval_tk_to_en}
+See it yourself [here](https://docs.google.com/spreadsheets/d/1TaHgaWZHtCuS97wipRkx_21IK8qIVg1SOivIJdzfBks/edit?usp=sharing)
+
+As you can see all the fine-tuned translations are different from the original. OK, but they are not good. Even worse, the original translations are now more accurate. Sometimes it feels like the model pulls Turkish or other language. This is when I realized that I overfitted on a small dataset and now face [catastrophic forgetting](https://en.wikipedia.org/wiki/Catastrophic_forgetting). I decided to stop here and try to find a solution for this problem.
+
+## Let's start tuning wisely
+*(Ýedi ölçäp bir train et)*
+### Put some thought and give it a shot
+After some thinking and research I decided to change the `LoRA config` and `Training arguments` a bit. *(I am not going to teach you what all those parameters mean; you can read about them in the [LoRA paper](https://arxiv.org/abs/2106.09685) or [HuggingFace documentation](https://huggingface.co/docs/peft/index). I will just show you what I changed and why.)*
+
+### Jumping ahead to the *Good*-bad results
+Although I did not achieve as *(good)* metrics as in the *(bad)* training, I saw a difference in the human-evaluation test samples.
+*Metrics comparison*:
+English to Turkmen
+![Good metrics](assets/metrics_comparison_en_to_tk_(good).png){#fig:good-metrics_en_to_tk}
+| Metric                    | Fine-tuned | Original | Difference |
+|---------------------------|-----------:|---------:|-----------:|
+| **BLEU**                  |       8.24 |     8.12 |      +0.12 |
+| **chrF**                  |      39.55 |    39.46 |      +0.09 |
+| **TER (lower is better)** |      87.20 |    87.30 |      -0.10 |
+
+Turkmen to English
+![Good metrics](assets/metrics_comparison_tk_to_en_(good).png){#fig:good-metrics_tk_to_en}
+| Metric                    | Fine-tuned | Original | Difference |
+|---------------------------|-----------:|---------:|-----------:|
+| **BLEU**                  |      25.88 |    26.48 |      -0.60 |
+| **chrF**                  |      52.71 |    52.91 |      -0.20 |
+| **TER (lower is better)** |      67.70 |    69.70 |      -2.00 |
+
+*Google Sheets*:
+English to Turkmen translation
+![Good human evaluation En -> Tk](assets/translation_comparison_results_en_to_tk_(Good).png){#fig:bad-human-eval_en_to_tk}
+See it yourself [here](https://docs.google.com/spreadsheets/d/1LI1ipu4rPjG-NKuXAaHz5wmUzIRgsaixpBIE-7Kb0Hk/edit?usp=sharing)
+
+Turkmen to English translation
+![Good human evaluation Tk -> En](assets/translation_comparison_results_tk_to_en_(Good).png){#fig:good-human-eval_tk_to_en}
+See it yourself [here](https://docs.google.com/spreadsheets/d/1TaHgaWZHtCuS97wipRkx_21IK8qIVg1SOivIJdzfBks/edit?usp=sharing)
+
+Again, pay attention to the translation rows that are different from the original model. First of all, not all the translations are different (most of them are similar), which is a good sign that our model did not forget the original translation ability. Second, the translations are not perfect but they are not bad either. I would say they are a little more accurate than the original ones. Yes, we did it *(Meseläň mesele dälä)*! I saw a slight improvement in quality by tuning on the custom dataset with no overfitting and catastrophic forgetting. And let's see what I did to achieve this.
+
+## LoRA Config
+**r**
+My choice of `r=16` is reasonable (but could be smaller). And with `lora_alpha=32` it gives the scaling factor of 2.0 which is recommended in the paper.
+
+**Target Modules** (Most critical)
+- Bad: `["q_proj", "v_proj", "k_proj", "o_proj"]` (All attention modules)
+- Good: `["q_proj", "v_proj"]` (Only query and value projections)
+Impact: This is the most significant difference where training all attention modules (q, k, v, o) with LoRA can be too aggressive for fine-tuning.
+Fewer target modules = fewer trainable parameters = less risk of overfitting and as a result we get fewer trainable params: `2359296 | All params: 617433088 | Trainable%: 0.38%`
+
+## Training arguments
+**Learning rate** (Most critical)
+- Bad: 5e-4 (0.0005)
+- Good: 1e-5 (0.00001)
+Impact: My initial learning rate was 50 times higher! This is the primary cause of my problems:
+- Too high LR causes the model to take huge steps, destroying the pretrained knowledge
+- Leads to catastrophic forgetting as the model "unlearns" its multilingual capabilities
+- Causes overfitting by aggressively fitting to your specific dataset
+
+**Batch size**
+- Bad: `per_device_train_batch_size=8`
+- Good: `per_device_train_batch_size=4`
+Impact: Larger batch size with high learning rate amplifies the problems:
+- Larger batches mean more stable gradients, which with high LR leads to more dramatic parameter updates
+- Smaller batches in the good config create noisier gradients, which acts as regularization
+
+**Epochs**
+- Bad: `num_train_epochs=15`
+- Good: `num_train_epochs=5`
+Impact: Training for 3x longer with a high learning rate:
+- Gives more opportunity for overfitting  
+- Allows more time for catastrophic forgetting  
+- Pretrained models typically need fewer epochs for fine-tuning (especially with small datasets)
+
+**Weight decay**
+- Bad: `weight_decay=0.01`
+- Good: `weight_decay=0.005`
+Impact: Higher weight decay wasn't enough to counter the high learning rate:
+While 0.01 is stronger regularization, it couldn't compensate for the aggressive learning rate.
+The lower weight decay in the good config is sufficient with the conservative learning rate.
+
+**Learning rate scheduler**
+- Bad: `lr_scheduler_type="linear"`
+- Good: `lr_scheduler_type="cosine"`
+Impact: Linear decay with high initial LR:
+- Linear decay maintains a relatively high learning rate for longer
+- Cosine provides a more gradual, smooth decay that's better for fine-tuning.
+- This helps in achieving better convergence and prevents overshooting during training.
+
+## Conclusion
+This is not the final model. I just stoped on the beggining to share this with you and wrap it up to the HuggingFace models, dataset and demo space. And ofcourse this parameters are not ideal and I want to learn from your comments what I missed and what I can improve. I am just happy enough to see the Turkmen language can be tuned if we have more data and computation *(Çözdümi?)*.
+
+## Future work
+- I need to collect more more more clean data.
+- I want to try the `madlad400-10b-mt` model and see if it can outperform the NLLB-200.
+- I want to try the `LoRA` with `QLoRA` and see if it can outperform the NLLB-200.
+- I want to use [sacreBLEU](https://github.com/mjpost/sacrebleu) metric instead.
+- I want to explore the impact of different learning rates and other hyperparameters on model performance.
+*(Aýlanaý esli ço)*
+
+## Links
+- [GitHub repository](https://github.com/merdandt/nllb-tk-en-lora)
+- [Space demo](https://huggingface.co/spaces/XSkills/nllb-turkmen-english)
+- Merged model for inference [nllb-200-turkmen-english-lora](https://huggingface.co/XSkills/nllb-200-turkmen-english-lora/tree/main)
+- Model adapters [nllb-200-turkmen-english-lora-adapter](https://huggingface.co/XSkills/nllb-200-turkmen-english-lora-adapter/tree/main)
+- Dataset [turkmen_english_s500](https://huggingface.co/datasets/XSkills/turkmen_english_s500)
